@@ -1,0 +1,1 @@
+Алексей Иванов. Навыки: Python, pandas, numpy, matplotlib, SQL, Git. Проект churn prediction (ROC-AUC 0.74).

@@ -1,0 +1,1 @@
+Компания ищет Junior Data Scientist. Нужны: Python, pandas, numpy, scikit-learn, SQL, matplotlib; плюсом Docker, Airflow, Git.

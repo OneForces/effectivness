@@ -1,0 +1,8 @@
+__MACOSX/
+._*
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.ipynb_checkpoints/
+.DS_Store
