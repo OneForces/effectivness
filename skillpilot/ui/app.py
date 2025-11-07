@@ -12,6 +12,12 @@ from ..graph.skill_graph import demo_graph_reco, render_graph_png
 from ..utils.export import export_md, export_pdf
 from ..gen.llm_ollama import is_available as ollama_up  # индикатор статуса
 from ..gen.llm import llm_stream  # настоящий стрим для песочницы
+from ..utils.pii import anonymize  # режим приватности (PII)
+
+# ⬇️ новые утилиты (вау-фичи)
+from ..utils.batch import batch_score, read_any_to_text
+from ..utils.viz import radar_coverage, heat_coverage
+from ..utils.ats import ats_check
 
 THEME_MODE = (os.getenv("THEME", "light") or "light").strip().lower()  # light | dark
 
@@ -217,10 +223,10 @@ def ui():
       --background-fill-secondary:#101826 !important;
       --block-background-fill:#101826 !important;
       --border-color-primary:#293247 !important;
-      --color-text:#E6EAF2 !important;
+      --color-text:#E6EAF2 !импортант;
     }
 
-    .gradio-container { max-width:1160px !important; margin:0 auto !important; }
+    .gradio-container { max_width:1160px !important; margin:0 auto !important; }
     html, body { background:var(--sp-bg) !important; color:var(--sp-text) !important; }
     .prose, .gr-prose, .markdown, .markdown * { color:var(--sp-text) !important; }
 
@@ -299,7 +305,7 @@ def ui():
 
     .gr-button,.btn { border-radius:12px !important; }
 
-    .tabs{ margin-top:6px; }
+    .tabs{ margin_top:6px; }
     .tabs > div[role="tablist"] button[aria-selected="true"] { box-shadow: inset 0 -2px 0 0 var(--sp-accent) !important; }
 
     ::-webkit-scrollbar{ height:10px; width:10px; }
@@ -375,6 +381,17 @@ def ui():
                     btn_demo = gr.Button("Загрузить демоданные", variant="secondary")
                     btn_clear = gr.Button("Очистить поля", variant="stop")
 
+            # ----- Пакетная проверка (новая)
+            with gr.Tab("📦 Пакетная проверка"):
+                gr.Markdown("Сравнить пачку резюме с текущим JD. Загрузите ZIP или выберите несколько файлов.")
+                with gr.Row():
+                    zip_in = gr.File(label="ZIP с резюме (txt/pdf/docx/md)", file_types=[".zip"])
+                    files_in = gr.Files(label="Или выберите несколько файлов", type="filepath")
+                with gr.Row():
+                    btn_batch = gr.Button("Скоринг пачки", variant="primary")
+                batch_table = gr.Dataframe(headers=["resume","score","strengths","gaps"], interactive=False, wrap=True)
+                csv_out = gr.File(label="Экспорт CSV", interactive=False)
+
             # ----- Анализ
             with gr.Tab("🧮 Анализ"):
                 with gr.Row():
@@ -382,6 +399,8 @@ def ui():
                     strengths = gr.JSON(label="Сильные стороны", elem_classes=["sp-card"])
                     gaps = gr.JSON(label="Пробелы", elem_classes=["sp-card"])
                 diag = gr.Textbox(label="Диагностика / Coverage", lines=8, elem_classes=["sp-card"])
+                with gr.Row():
+                    hide_pii = gr.Checkbox(value=True, label="Скрывать PII (имена/email/телефон) перед обработкой", elem_classes=["sp-card"])
                 with gr.Row():
                     btn_fit = gr.Button("Оценить соответствие", variant="primary", interactive=False)
                     btn_graph = gr.Button("Построить рекомендации навыков", variant="secondary", interactive=False)
@@ -415,6 +434,19 @@ def ui():
                 with gr.Row():
                     path_text = gr.Textbox(label="SkillGraph рекомендации (текст)", lines=8, elem_classes=["sp-card"])
                     graph_img = gr.Image(label="SkillGraph (PNG)", type="filepath", elem_classes=["sp-card"])
+
+            # ----- Визуализация (новая)
+            with gr.Tab("📊 Визуализация"):
+                gr.Markdown("Radar и Heatmap по покрытию топ-навыков JD из блока «Диагностика / Coverage».")
+                viz_radar = gr.Image(label="Radar", type="filepath")
+                viz_heat  = gr.Image(label="Heatmap", type="filepath")
+                btn_viz   = gr.Button("Построить графики", variant="secondary")
+
+            # ----- ATS-чекер (новая)
+            with gr.Tab("🧾 ATS-чекер"):
+                gr.Markdown("Быстрый аудит структуры резюме под ATS.")
+                ats_json = gr.JSON(label="Отчёт")
+                btn_ats  = gr.Button("Проверить текущее резюме", variant="secondary")
 
             # ----- Мини-интервью
             with gr.Tab("🎤 Мини-интервью"):
@@ -472,52 +504,93 @@ def ui():
         btn_clear.click(lambda: (gr.update(interactive=False),)*5, inputs=None, outputs=[btn_fit, btn_graph, btn_tailor, btn_cover, btn_plan])
         btn_clear.click(lambda: ("", "", "", "", ""), inputs=None, outputs=[tailored, cover, plan, qlist, diag])
 
+        # ---- Пакетная проверка (handler)
+        def _do_batch(jd_text, zip_file, file_list, hide):
+            if not (jd_text or "").strip():
+                return [], None
+            J = anonymize(jd_text) if hide else jd_text
+            resumes = []
+            # ZIP
+            if zip_file is not None:
+                try:
+                    with zipfile.ZipFile(zip_file.name, "r") as z:
+                        for nm in z.namelist():
+                            if nm.endswith("/") or nm.startswith("__MACOSX/"): 
+                                continue
+                            data = z.read(nm)
+                            try:
+                                txt = data.decode("utf-8", "ignore")
+                            except Exception:
+                                txt = ""
+                            resumes.append((nm, anonymize(txt) if hide else txt))
+                except Exception:
+                    pass
+            # files
+            if file_list:
+                for fp in file_list:
+                    path = fp if isinstance(fp, str) else getattr(fp, "name", "")
+                    name = os.path.basename(path)
+                    txt = read_any_to_text(path)
+                    resumes.append((name, anonymize(txt) if hide else txt))
+
+            if not resumes:
+                return [], None
+            rows, csv_path = batch_score(J, resumes)
+            table = [[r["resume"], r["score"], r["strengths"], r["gaps"]] for r in rows]
+            return table, csv_path
+
+        btn_batch.click(_do_batch, inputs=[jd, zip_in, files_in, hide_pii], outputs=[batch_table, csv_out])
+
         # ---- Анализ
-        def do_fit(jd_text, cv_text, progress=gr.Progress(track_tqdm=True)):
+        def do_fit(jd_text, cv_text, hide, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(jd_text, cv_text):
                 return 0, [], [], "Сначала вставьте JD и резюме."
+            J = anonymize(jd_text) if hide else jd_text
+            R = anonymize(cv_text) if hide else cv_text
             progress(0.12, desc="🔎 Извлекаем ключевые фразы…")
             time.sleep(0.05)
             progress(0.35, desc="🧠 Считаем эмбеддинги…")
-            s, st, gp, msg = score_fit(jd_text, cv_text)
+            s, st, gp, msg = score_fit(J, R)
             progress(0.9, desc="🧾 Формируем отчёт…")
             time.sleep(0.05)
             progress(1.0)
             return s, st, gp, msg
 
-        btn_fit.click(do_fit, inputs=[jd, resume], outputs=[score_out, strengths, gaps, diag])
+        btn_fit.click(do_fit, inputs=[jd, resume, hide_pii], outputs=[score_out, strengths, gaps, diag])
 
         # ---- Генерация (визуальный стрим)
         def _gen_stream_wrapper(text: str):
             yield from _yield_chunks(text)
 
-        def _guarded(gen_fn, j, r, do_stream: bool, progress=gr.Progress(track_tqdm=True)):
+        def _guarded(gen_fn, j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
                 return "Сначала заполните JD и резюме."
+            J = anonymize(j) if hide else j
+            R = anonymize(r) if hide else r
             progress(0.08, desc="🔧 Готовим промпт…")
             time.sleep(0.05)
             progress(0.28, desc="🤖 Вызываем LLM…")
-            out = gen_fn(r, j)
+            out = gen_fn(R, J)  # сигнатуры генераторов: (resume, jd)
             progress(0.9, desc="✍️ Заполняем поле…")
             return (_gen_stream_wrapper(out) if do_stream else out)
 
-        tailor_evt = btn_tailor.click(lambda j, r, st: _guarded(make_tailored_resume, j, r, st),
-                                      inputs=[jd, resume, stream_out], outputs=[tailored])
+        tailor_evt = btn_tailor.click(lambda j, r, st, hide: _guarded(make_tailored_resume, j, r, st, hide),
+                                      inputs=[jd, resume, stream_out, hide_pii], outputs=[tailored])
 
-        cover_evt = btn_cover.click(lambda j, r, st: _guarded(make_cover, j, r, st),
-                                    inputs=[jd, resume, stream_out], outputs=[cover])
+        cover_evt = btn_cover.click(lambda j, r, st, hide: _guarded(make_cover, j, r, st, hide),
+                                    inputs=[jd, resume, stream_out, hide_pii], outputs=[cover])
 
-        def _make_plan(j, r, do_stream: bool, progress=gr.Progress(track_tqdm=True)):
+        def _make_plan(j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
                 return "Сначала заполните JD и резюме."
-            progress(0.2, desc="📊 Оцениваем пробелы…")
-            gaps_local = score_fit(j, r)[2]
-            progress(0.55, desc="🗓 Генерируем план…")
-            out = make_7day_plan(gaps_local, role_hint="под JD")
+            J = anonymize(j) if hide else j
+            R = anonymize(r) if hide else r
+            progress(0.2, desc="📊 Анализируем JD/резюме…")
+            out = make_7day_plan(J, R)  # исходная сигнатура генератора плана
             progress(0.9, desc="✍️ Заполняем поле…")
             return (_gen_stream_wrapper(out) if do_stream else out)
 
-        plan_evt = btn_plan.click(_make_plan, inputs=[jd, resume, stream_out], outputs=[plan])
+        plan_evt = btn_plan.click(_make_plan, inputs=[jd, resume, stream_out, hide_pii], outputs=[plan])
 
         # Кнопка «Стоп» реально останавливает любые три генерации выше
         btn_stop.click(lambda: None, inputs=None, outputs=None, cancels=[tailor_evt, cover_evt, plan_evt])
@@ -537,16 +610,65 @@ def ui():
         btn_stop_pp.click(lambda: None, inputs=None, outputs=None, cancels=[pp_evt])
 
         # ---- Навыки / Граф
-        def _graph_text(j, r, progress=gr.Progress()):
+        def _graph_text(j, r, hide, progress=gr.Progress()):
             if not _can_run(j, r):
                 return "Сначала заполните JD и резюме."
+            J = anonymize(j) if hide else j
+            R = anonymize(r) if hide else r
             progress(0.4, desc="🌐 Строим рекомендации…")
-            txt = demo_graph_reco(r, target_role="под JD")
+            res = demo_graph_reco(J, R)
+            try:
+                G, have, recs = res
+                txt = "Имеющиеся навыки: " + ", ".join(sorted(have)) + "\n" + \
+                      "Рекомендуемые навыки: " + ", ".join(sorted(recs))
+            except Exception:
+                txt = str(res)
             progress(1.0)
             return txt
 
-        btn_graph.click(_graph_text, inputs=[jd, resume], outputs=[path_text])
-        btn_graph.click(lambda r: render_graph_png(r, target_role="под JD"), inputs=[resume], outputs=[graph_img])
+        def _graph_img(j, r, hide):
+            J = anonymize(j) if hide else j
+            R = anonymize(r) if hide else r
+            res = demo_graph_reco(J, R)
+            try:
+                G, _, _ = res
+            except Exception:
+                return None
+            return render_graph_png(G, target_role="под JD")
+
+        btn_graph.click(_graph_text, inputs=[jd, resume, hide_pii], outputs=[path_text])
+        btn_graph.click(_graph_img, inputs=[jd, resume, hide_pii], outputs=[graph_img])
+
+        # ---- Визуализация (парсим coverage из diag)
+        def _parse_marks(diag_text: str):
+            marks, skills = [], []
+            if "Coverage:" in (diag_text or ""):
+                try:
+                    cov = diag_text.split("Coverage:",1)[1].strip()
+                    parts = [p.strip() for p in cov.split(",")]
+                    for p in parts:
+                        if ":" in p:
+                            skill, flag = p.split(":",1)
+                            skill = skill.strip().strip("-• ")
+                            ok = "✅" in flag
+                            if skill:
+                                skills.append(skill)
+                                marks.append(ok)
+                except Exception:
+                    pass
+            return skills[:12], marks[:12]
+
+        def _viz(diag_text):
+            skills, marks = _parse_marks(diag_text)
+            if not skills:
+                return None, None
+            return radar_coverage(skills, marks), heat_coverage(skills, marks)
+
+        btn_viz.click(_viz, inputs=[diag], outputs=[viz_radar, viz_heat])
+
+        # ---- ATS-чекер
+        btn_ats.click(lambda txt, hide: ats_check(anonymize(txt) if hide else txt),
+                      inputs=[resume, hide_pii], outputs=[ats_json])
 
         # ---- Пакет ZIP
         btn_bundle.click(lambda t, c, p, j, r: _bundle_artifacts(t, c, p, j, r),
