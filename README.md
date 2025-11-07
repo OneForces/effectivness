@@ -230,7 +230,7 @@ docker logs -f ollama
 
 ## Лицензия
 
-MIT (или та, что выберете).
+MIT
 
 ---
 
