@@ -1,4 +1,5 @@
-import os, io, re, tempfile, time, zipfile
+# skillpilot/ui/app.py
+import os, io, re, tempfile, time, zipfile, json, datetime
 import gradio as gr
 
 from ..config import LLM_BACKEND, OLLAMA_MODEL, EMB_MODEL
@@ -9,12 +10,30 @@ from ..gen.plan import make_7day_plan
 from ..interview.qa import gen_questions, grade_answer
 from ..graph.skill_graph import demo_graph_reco, render_graph_png
 from ..utils.export import export_md, export_pdf
+from ..gen.llm_ollama import is_available as ollama_up  # индикатор статуса
+from ..gen.llm import llm_stream  # настоящий стрим для песочницы
 
-THEME_MODE = os.getenv("THEME", "light").strip().lower()  # light | dark
+THEME_MODE = (os.getenv("THEME", "light") or "light").strip().lower()  # light | dark
+
+
+# ---------------- paths for sessions ----------------
+def _sess_dir() -> str:
+    d = os.path.expanduser("~/.skillpilot/sessions")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _sess_path(name: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", (name or "").strip()) or "session"
+    return os.path.join(_sess_dir(), f"{safe}.json")
+
+def _list_sessions() -> list[str]:
+    try:
+        return sorted([f for f in os.listdir(_sess_dir()) if f.endswith(".json")])
+    except Exception:
+        return []
 
 
 # ---------------- helpers ----------------
-
 def _bundle_artifacts(tailored_text: str, cover_text: str, plan_text: str, jd_text: str, resume_text: str) -> str | None:
     if not any([tailored_text, cover_text, plan_text, jd_text, resume_text]):
         return None
@@ -26,7 +45,7 @@ def _bundle_artifacts(tailored_text: str, cover_text: str, plan_text: str, jd_te
             return
         path = os.path.join(tmpdir, name)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(content.strip() + "\n")
+            f.write((content or "").strip() + "\n")
         files.append(path)
 
     _write("job_description.txt", jd_text)
@@ -62,9 +81,8 @@ def _can_run(jd_text: str, cv_text: str) -> bool:
 
 
 # ---------- lightweight file ingest (PDF/DOCX/TXT/MD) ----------
-
 def _clean_txt(txt: str) -> str:
-    txt = txt.replace("\x00", " ")
+    txt = (txt or "").replace("\x00", " ")
     txt = re.sub(r"\r\n?", "\n", txt)
     txt = re.sub(r"\n{3,}", "\n\n", txt)
     return txt.strip()
@@ -72,7 +90,7 @@ def _clean_txt(txt: str) -> str:
 def _read_any(file_obj) -> str:
     if not file_obj:
         return ""
-    name = (os.path.basename(file_obj.name) if hasattr(file_obj, "name") else "").lower()
+    name = (os.path.basename(getattr(file_obj, "name", "") or "")).lower()
     try:
         with open(file_obj.name, "rb") as f:
             data = f.read()
@@ -111,8 +129,18 @@ def _read_any(file_obj) -> str:
         return "[ERROR] Не удалось декодировать файл как UTF-8."
 
 
-# ---------------- UI ----------------
+# ---------- streaming helper (визуальный стрим) ----------
+def _yield_chunks(text: str, chunk: int = 48, delay: float = 0.015):
+    """Простой «визуальный» стрим (без реального онлайнового токен-стрима)."""
+    text = (text or "").strip()
+    acc = ""
+    for i in range(0, len(text), chunk):
+        acc = text[: i + chunk]
+        time.sleep(delay)
+        yield acc
 
+
+# ---------------- UI ----------------
 def ui():
     theme = gr.themes.Soft(primary_hue="blue", secondary_hue="slate", neutral_hue="slate")
 
@@ -163,9 +191,20 @@ def ui():
     ::-webkit-scrollbar{ height:10px; width:10px; }
     ::-webkit-scrollbar-thumb{ background:#D2D8E4; border-radius:8px; }
     ::-webkit-scrollbar-track{ background:#EFF2F8; }
+
+    /* Делаем чекбокс гарантированно кликабельным */
+    #stream_out input[type="checkbox"]{
+      appearance:auto !important;
+      accent-color: var(--sp-accent) !important;
+      width:20px; height:20px;
+      border:1.5px solid var(--sp-card-border) !important;
+      border-radius:6px;
+      background: var(--sp-card-bg) !important;
+      position: relative; z-index: 5; pointer-events: auto !important;
+    }
+    #stream_out, #stream_out * { position: relative; z-index: 5; pointer-events: auto !important; }
     """
 
-    # Тёмная: полностью прибиваем любые white bg (включая tailwind'овские bg-white)
     CSS_DARK = """
     :root {
       --sp-bg:#0B1220; --sp-text:#E6EAF2;
@@ -185,7 +224,6 @@ def ui():
     html, body { background:var(--sp-bg) !important; color:var(--sp-text) !important; }
     .prose, .gr-prose, .markdown, .markdown * { color:var(--sp-text) !important; }
 
-    /* Карточки и ВСЕ типовые контейнеры */
     .sp-card,
     .gradio-container .gr-box,
     .gradio-container .gr-panel,
@@ -198,13 +236,21 @@ def ui():
     .gradio-container .block,
     .gradio-container .panel,
     .gradio-container .border,
-    .gradio-container .shadow {
+    .gradio-container .shadow,
+    .gradio-container .file-wrap,
+    .gradio-container .upload-box,
+    .gradio-container .file-preview,
+    .gradio-container .gr-accordion,
+    .gradio-container .gr-accordion .gr-accordion-header,
+    .gradio-container .gr-accordion .gr-accordion-content,
+    .gradio-container .gr-dataframe,
+    .gradio-container .gr-dataframe thead tr th,
+    .gradio-container .gr-dataframe tbody tr td {
       background:var(--sp-card-bg) !important;
       border-color:var(--sp-card-border) !important;
       color:var(--sp-text) !important;
     }
 
-    /* убиваем все "bg-white" и прозрачные наливки, которые Gradio/TAILWIND кидает внутри */
     .gradio-container .bg-white,
     .gradio-container .bg-white\\/0,
     .gradio-container .bg-white\\/50,
@@ -214,7 +260,12 @@ def ui():
       background-color:var(--sp-card-bg) !important;
     }
 
-    /* Текстовые поля — перекрываем все уровни вложенности */
+    .gradio-container pre, .gradio-container code, .gradio-container kbd, .gradio-container samp {
+      background:rgba(255,255,255,0.03) !important;
+      color:var(--sp-text) !important;
+      border:1px solid var(--sp-card-border) !important;
+    }
+
     .gradio-container textarea,
     .gradio-container input[type="text"],
     .gradio-container .gr-input,
@@ -232,7 +283,6 @@ def ui():
       box-shadow:none !important;
     }
 
-    /* disabled / focus */
     .gradio-container textarea:disabled,
     .gradio-container input[type="text"]:disabled {
       background:var(--sp-card-bg) !important; color:var(--sp-text) !important; opacity:0.9;
@@ -242,22 +292,10 @@ def ui():
       outline:1px solid var(--sp-accent) !important;
     }
 
-    /* лейблы/подписи */
     .gradio-container label, .gradio-container .label, .gradio-container .label-wrap,
     .gradio-container .md, .gradio-container .prose {
       color:var(--sp-text) !important; background:transparent !important;
     }
-
-    /* upload-зоны и предпросмотр файлов */
-    .gradio-container .file-wrap, .gradio-container .upload-box, .gradio-container .file-preview {
-      background:var(--sp-card-bg) !important; border-color:var(--sp-card-border) !important; color:var(--sp-text) !important;
-    }
-
-    .sp-pill { display:inline-block; padding:4px 10px; border-radius:999px;
-      background:var(--sp-pill-bg) !important; color:var(--sp-pill-text) !important; margin-right:8px; font-size:12px }
-
-    .sp-hero h1 { margin:0; font-size:26px }
-    .sp-hero small { opacity:.85 }
 
     .gr-button,.btn { border-radius:12px !important; }
 
@@ -267,12 +305,24 @@ def ui():
     ::-webkit-scrollbar{ height:10px; width:10px; }
     ::-webkit-scrollbar-thumb{ background:#2D3B55; border-radius:8px; }
     ::-webkit-scrollbar-track{ background:#0E1522; }
+
+    /* Делаем чекбокс гарантированно кликабельным */
+    #stream_out input[type="checkbox"]{
+      appearance:auto !important;
+      accent-color: var(--sp-accent) !important;
+      width:20px; height:20px;
+      border:1.5px solid var(--sp-card-border) !important;
+      border-radius:6px;
+      background: var(--sp-card-bg) !important;
+      position: relative; z-index: 5; pointer-events: auto !important;
+    }
+    #stream_out, #stream_out * { position: relative; z-index: 5; pointer-events: auto !important; }
     """
 
     css = CSS_DARK if THEME_MODE == "dark" else CSS_LIGHT
 
     with gr.Blocks(title="SkillPilot", theme=theme, css=css) as demo:
-        # Header
+        # Header + LLM статус
         with gr.Row():
             with gr.Column(scale=3):
                 gr.Markdown(
@@ -285,17 +335,30 @@ def ui():
                     elem_classes=["sp-card"]
                 )
             with gr.Column(scale=2):
-                backend = (f"Ollama · {OLLAMA_MODEL}" if LLM_BACKEND == "ollama" else LLM_BACKEND.upper())
-                gr.Markdown(
-                    f"""
-                    <div class="sp-card">
-                        <div class="sp-pill">LLM: {backend}</div>
-                        <div class="sp-pill">Embeddings: {EMB_MODEL}</div>
-                        <div class="sp-pill">UI: Gradio</div>
-                    </div>
-                    """,
-                    elem_classes=["sp-card"]
-                )
+                backend = (f"Ollama · {OLLAMA_MODEL}" if (LLM_BACKEND or "").lower() == "ollama" else (LLM_BACKEND or "—").upper())
+                status_html = gr.HTML(elem_classes=["sp-card"])
+
+                def _llm_status():
+                    if (LLM_BACKEND or "").lower() == "ollama":
+                        ok = ollama_up()
+                        dot = "🟢" if ok else "🔴"
+                        return f"""
+                        <div class="sp-card">
+                          <div class="sp-pill">LLM: {backend}</div>
+                          <div class="sp-pill">Embeddings: {EMB_MODEL}</div>
+                          <div class="sp-pill">UI: Gradio</div>
+                          <div style="margin-top:8px">{dot} <b>Ollama</b> status: {"online" if ok else "offline"}</div>
+                        </div>"""
+                    else:
+                        return f"""
+                        <div class="sp-card">
+                          <div class="sp-pill">LLM: {backend}</div>
+                          <div class="sp-pill">Embeddings: {EMB_MODEL}</div>
+                          <div class="sp-pill">UI: Gradio</div>
+                          <div style="margin-top:8px">ℹ️ Для OpenAI-совместимых эндпоинтов прогресс виден в баре действий.</div>
+                        </div>"""
+                status_html.value = _llm_status()
+                gr.Button("↻ Проверить LLM").click(lambda: _llm_status(), outputs=status_html)
 
         with gr.Tabs():
             # ----- Данные
@@ -329,6 +392,9 @@ def ui():
                     btn_tailor = gr.Button("Адаптировать резюме (STAR)", variant="primary", interactive=False)
                     btn_cover = gr.Button("Сгенерировать сопроводительное", variant="primary", interactive=False)
                     btn_plan = gr.Button("План на 7 дней", variant="secondary", interactive=False)
+                stream_out = gr.Checkbox(value=True, label="⚡️ Стримить вывод (визуально)", interactive=True, elem_id="stream_out")
+                btn_stop = gr.Button("⏹️ Остановить генерацию", variant="stop")
+
                 tailored = gr.Textbox(label="Адаптированное резюме", lines=12, elem_classes=["sp-card"])
                 cover = gr.Textbox(label="Сопроводительное письмо", lines=12, elem_classes=["sp-card"])
                 plan = gr.Textbox(label="План на 7 дней", lines=12, elem_classes=["sp-card"])
@@ -359,29 +425,40 @@ def ui():
                 btn_grade = gr.Button("Оценить ответ", variant="primary")
                 grade = gr.Textbox(label="Фидбек по рубрике", lines=10, elem_classes=["sp-card"])
 
-            # ----- Настройки
-            with gr.Tab("⚙️ Настройки"):
+            # ----- Prompt-песочница
+            with gr.Tab("🧪 Prompt-песочница"):
+                sys_box = gr.Textbox(label="System", lines=4, placeholder="Кем модель должна быть")
+                usr_box = gr.Textbox(label="User", lines=8, placeholder="Ваш запрос/промпт")
+                with gr.Row():
+                    temp = gr.Slider(0.0, 1.5, value=0.25, step=0.05, label="temperature")
+                    mxtok = gr.Slider(64, 4096, value=800, step=32, label="max_tokens")
+                btn_run_pp = gr.Button("▶️ Запустить (реальный стрим)")
+                btn_stop_pp = gr.Button("⏹️ Стоп", variant="stop")
+                out_pp = gr.Textbox(label="Ответ (stream)", lines=14)
+
+            # ----- Настройки / Сессии
+            with gr.Tab("⚙️ Настройки / Сессии"):
                 gr.Markdown(
                     f"""
                     <div class="sp-card">
-                      <p><b>Backend:</b> {LLM_BACKEND or '—'}</p>
-                      <p><b>Ollama model:</b> {OLLAMA_MODEL or '—'}</p>
-                      <p><b>Embeddings:</b> {EMB_MODEL or '—'}</p>
-                      <p>Тему можно задать через переменную окружения <code>THEME=dark|light</code>
-                      или параметр в урле <code>__theme=dark</code>.</p>
+                      <p><b>Backend:</b> {LLM_BACKEND or '—'}; <b>Ollama model:</b> {OLLAMA_MODEL or '—'}; <b>Embeddings:</b> {EMB_MODEL or '—'}</p>
+                      <p>Тема: <code>THEME=dark|light</code> или URL параметр <code>__theme=dark</code>.</p>
                     </div>
                     """,
                     elem_classes=["sp-card"]
                 )
+                with gr.Row():
+                    sess_name = gr.Textbox(label="Имя сессии", placeholder="напр. vacancy_senior_ds")
+                    btn_save_sess = gr.Button("💾 Сохранить сессию")
+                with gr.Row():
+                    sess_list = gr.Dropdown(choices=_list_sessions(), label="Загрузить сессию", allow_custom_value=False)
+                    btn_refresh_sess = gr.Button("🔄 Обновить список")
 
-        # handlers
+        # -------- handlers --------
+
         btn_demo.click(_load_demo, inputs=None, outputs=[jd, resume])
 
-        btn_file2text.click(
-            lambda f1, f2: (_read_any(f1), _read_any(f2)),
-            inputs=[jd_file, cv_file],
-            outputs=[jd, resume]
-        )
+        btn_file2text.click(lambda f1, f2: (_read_any(f1), _read_any(f2)), inputs=[jd_file, cv_file], outputs=[jd, resume])
 
         def _update_buttons(jd_text, cv_text):
             ok = _can_run(jd_text, cv_text)
@@ -395,67 +472,154 @@ def ui():
         btn_clear.click(lambda: (gr.update(interactive=False),)*5, inputs=None, outputs=[btn_fit, btn_graph, btn_tailor, btn_cover, btn_plan])
         btn_clear.click(lambda: ("", "", "", "", ""), inputs=None, outputs=[tailored, cover, plan, qlist, diag])
 
-        def do_fit(jd_text, cv_text):
+        # ---- Анализ
+        def do_fit(jd_text, cv_text, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(jd_text, cv_text):
                 return 0, [], [], "Сначала вставьте JD и резюме."
+            progress(0.12, desc="🔎 Извлекаем ключевые фразы…")
+            time.sleep(0.05)
+            progress(0.35, desc="🧠 Считаем эмбеддинги…")
             s, st, gp, msg = score_fit(jd_text, cv_text)
+            progress(0.9, desc="🧾 Формируем отчёт…")
+            time.sleep(0.05)
+            progress(1.0)
             return s, st, gp, msg
+
         btn_fit.click(do_fit, inputs=[jd, resume], outputs=[score_out, strengths, gaps, diag])
 
-        def _guarded(gen_fn, j, r):
+        # ---- Генерация (визуальный стрим)
+        def _gen_stream_wrapper(text: str):
+            yield from _yield_chunks(text)
+
+        def _guarded(gen_fn, j, r, do_stream: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
                 return "Сначала заполните JD и резюме."
-            return gen_fn(r, j)
+            progress(0.08, desc="🔧 Готовим промпт…")
+            time.sleep(0.05)
+            progress(0.28, desc="🤖 Вызываем LLM…")
+            out = gen_fn(r, j)
+            progress(0.9, desc="✍️ Заполняем поле…")
+            return (_gen_stream_wrapper(out) if do_stream else out)
 
-        btn_tailor.click(lambda j, r: _guarded(make_tailored_resume, j, r), inputs=[jd, resume], outputs=tailored)
-        btn_cover.click(lambda j, r: _guarded(make_cover, j, r), inputs=[jd, resume], outputs=cover)
-        btn_plan.click(lambda j, r: (make_7day_plan(score_fit(j, r)[2], role_hint="под JD")
-                                     if _can_run(j, r) else "Сначала заполните JD и резюме."),
-                       inputs=[jd, resume], outputs=plan)
+        tailor_evt = btn_tailor.click(lambda j, r, st: _guarded(make_tailored_resume, j, r, st),
+                                      inputs=[jd, resume, stream_out], outputs=[tailored])
 
-        def _graph_text(j, r):
+        cover_evt = btn_cover.click(lambda j, r, st: _guarded(make_cover, j, r, st),
+                                    inputs=[jd, resume, stream_out], outputs=[cover])
+
+        def _make_plan(j, r, do_stream: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
                 return "Сначала заполните JD и резюме."
-            return demo_graph_reco(r, target_role="под JD")
+            progress(0.2, desc="📊 Оцениваем пробелы…")
+            gaps_local = score_fit(j, r)[2]
+            progress(0.55, desc="🗓 Генерируем план…")
+            out = make_7day_plan(gaps_local, role_hint="под JD")
+            progress(0.9, desc="✍️ Заполняем поле…")
+            return (_gen_stream_wrapper(out) if do_stream else out)
+
+        plan_evt = btn_plan.click(_make_plan, inputs=[jd, resume, stream_out], outputs=[plan])
+
+        # Кнопка «Стоп» реально останавливает любые три генерации выше
+        btn_stop.click(lambda: None, inputs=None, outputs=None, cancels=[tailor_evt, cover_evt, plan_evt])
+
+        # ---- Prompt-песочница (настоящий стрим из llm_stream)
+        def _run_prompt(system, user, temperature, max_tokens):
+            acc = ""
+            try:
+                for chunk in llm_stream(system, user, temperature=temperature, max_tokens=int(max_tokens)):
+                    if chunk:
+                        acc += chunk
+                        yield acc
+            except Exception as e:
+                yield f"[STREAM ERROR] {type(e).__name__}: {e}"
+
+        pp_evt = btn_run_pp.click(_run_prompt, inputs=[sys_box, usr_box, temp, mxtok], outputs=[out_pp])
+        btn_stop_pp.click(lambda: None, inputs=None, outputs=None, cancels=[pp_evt])
+
+        # ---- Навыки / Граф
+        def _graph_text(j, r, progress=gr.Progress()):
+            if not _can_run(j, r):
+                return "Сначала заполните JD и резюме."
+            progress(0.4, desc="🌐 Строим рекомендации…")
+            txt = demo_graph_reco(r, target_role="под JD")
+            progress(1.0)
+            return txt
+
         btn_graph.click(_graph_text, inputs=[jd, resume], outputs=[path_text])
         btn_graph.click(lambda r: render_graph_png(r, target_role="под JD"), inputs=[resume], outputs=[graph_img])
 
+        # ---- Пакет ZIP
         btn_bundle.click(lambda t, c, p, j, r: _bundle_artifacts(t, c, p, j, r),
-                         inputs=[tailored, cover, plan, jd, resume], outputs=bundle_file)
+                         inputs=[tailored, cover, plan, jd, resume], outputs=[bundle_file])
 
-        def _export_md_all(t, c, p):
-            if not any([t, c, p]):
-                return None
+        # ---- Экспорт
+        def _export_md_all(t, c, p, progress=gr.Progress()):
+            if not any([t, c, p]): return None
+            progress(0.2, desc="📦 Готовим файлы…")
             out_dir = os.path.join("/tmp", f"skillpilot_md_{int(time.time())}")
             os.makedirs(out_dir, exist_ok=True)
             paths = []
             if t: paths.append(export_md(out_dir, "resume_tailored", t))
             if c: paths.append(export_md(out_dir, "cover_letter", c))
             if p: paths.append(export_md(out_dir, "plan_7days", p))
+            progress(0.65, desc="🧩 Упаковываем ZIP…")
             zip_path = os.path.join(out_dir, "md_package.zip")
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for pth in paths:
-                    z.write(pth, arcname=os.path.basename(pth))
-            return zip_path
+                for pth in paths: z.write(pth, arcname=os.path.basename(pth))
+            progress(1.0); return zip_path
 
-        btn_exp_md.click(_export_md_all, inputs=[tailored, cover, plan], outputs=md_pkg)
+        btn_exp_md.click(_export_md_all, inputs=[tailored, cover, plan], outputs=[md_pkg])
 
-        def _export_pdf_resume(t):
-            if not t:
-                return None
+        def _export_pdf_resume(t, progress=gr.Progress()):
+            if not t: return None
+            progress(0.4, desc="🖨 Рендерим PDF…")
             out_dir = os.path.join("/tmp", f"skillpilot_pdf_{int(time.time())}")
             path = export_pdf(out_dir, "resume_tailored", t, title="Адаптированное резюме")
-            return path
+            progress(1.0); return path
 
-        btn_exp_pdf.click(_export_pdf_resume, inputs=[tailored], outputs=pdf_file)
+        btn_exp_pdf.click(_export_pdf_resume, inputs=[tailored], outputs=[pdf_file])
 
-        btn_fit.click(lambda jd_text: ("\n".join(gen_questions(jd_text, 5)) if jd_text.strip() else "Сначала вставьте JD."),
-                      inputs=[jd], outputs=qlist)
-        btn_grade.click(lambda q_text, a_text: grade_answer(q_text, a_text), inputs=[q, a], outputs=grade)
+        # ---- Q&A
+        btn_fit.click(lambda jd_text: ("\n".join(gen_questions(jd_text, 5)) if (jd_text or "").strip() else "Сначала вставьте JD."),
+                      inputs=[jd], outputs=[qlist])
 
+        btn_grade.click(lambda q_text, a_text: grade_answer(q_text, a_text), inputs=[q, a], outputs=[grade])
+
+        # ---- Сохранение/загрузка сессий
+        def _save_session(name, jd_text, resume_text, tailored_text, cover_text, plan_text):
+            path = _sess_path(name)
+            payload = dict(
+                name=name,
+                ts=datetime.datetime.utcnow().isoformat() + "Z",
+                jd=jd_text, resume=resume_text,
+                tailored=tailored_text, cover=cover_text, plan=plan_text,
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            return gr.update(choices=_list_sessions())
+
+        btn_save_sess.click(_save_session,
+                            inputs=[sess_name, jd, resume, tailored, cover, plan],
+                            outputs=[sess_list])
+
+        btn_refresh_sess.click(lambda: gr.update(choices=_list_sessions()), inputs=None, outputs=[sess_list])
+
+        def _load_session(sel_name):
+            if not sel_name:
+                return gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+            path = os.path.join(_sess_dir(), sel_name)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data.get("jd",""), data.get("resume",""), data.get("tailored",""), data.get("cover",""), data.get("plan","")
+            except Exception as e:
+                return f"[LOAD ERROR] {e}", "", "", "", ""
+
+        sess_list.change(_load_session, inputs=[sess_list], outputs=[jd, resume, tailored, cover, plan])
+
+        # Footer
         gr.Markdown(
-            "⌛️ Подсказка: первая генерация с локальной LLM может дольше просыпаться на «холодной» модели. "
-            "Повторы быстрее благодаря keep_alive.",
+            "⌛️ Первая генерация на «холодной» модели может быть дольше; повторы быстрее благодаря keep_alive.",
             elem_classes=["sp-card"]
         )
 
