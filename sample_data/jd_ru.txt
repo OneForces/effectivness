@@ -1,1 +1,15 @@
-Компания ищет Junior Data Scientist. Нужны: Python, pandas, numpy, scikit-learn, SQL, matplotlib; плюсом Docker, Airflow, Git.
+Компания ищет Junior Data Scientist.
+Требования (must):
+- Python, pandas, numpy, scikit-learn
+- SQL (запросы, джоины, агрегации)
+- matplotlib/визуализация
+
+Плюсом (nice-to-have):
+- Docker (контейнеризация)
+- Airflow (ETL/оркестрация)
+- Git (командная работа)
+
+Задачи:
+- Предобработка данных, фичеинжиниринг, построение базовых моделей (логистическая регрессия, дерево решений, RandomForest)
+- Визуализация и отчётность
+- Участие в A/B-экспериментах и валидации моделей
