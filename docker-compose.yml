@@ -9,9 +9,8 @@ services:
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped
-    # platform: linux/arm64  # для Apple Silicon при необходимости
+    # platform: linux/arm64  # если Apple Silicon
 
-  # Одноразовый сервис для предварительной загрузки эмбеддингов в том
   embed_init:
     image: python:3.11-slim
     container_name: embed_init
@@ -23,7 +22,8 @@ services:
     command: >
       bash -lc "
         pip install -U --no-cache-dir sentence-transformers &&
-        python -c 'from sentence_transformers import SentenceTransformer as S; S(\"sentence-transformers/all-MiniLM-L6-v2\"); print(\"✅ cache primed\")'
+        python -c 'from sentence_transformers import SentenceTransformer as S; S(\"sentence-transformers/all-MiniLM-L6-v2\")' &&
+        echo '✅ cache primed'
       "
     restart: "no"
 
@@ -38,13 +38,11 @@ services:
       - PORT=7860
       - LLM_BACKEND=ollama
       - OLLAMA_HOST=http://ollama:11434
-      # единый кэш HF — тот же, что у init-сервиса
       - HF_HOME=/opt/hf
       - TRANSFORMERS_CACHE=/opt/hf
     ports:
       - "7860:7860"
     volumes:
-      # Монтируем ровно туда, где ждёт кэш приложение
       - model_cache:/opt/hf
       - ./sample_data:/app/sample_data:ro
     depends_on:
@@ -59,7 +57,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    # platform: linux/amd64  # uncomment on Apple Silicon if needed
 
 volumes:
   model_cache:

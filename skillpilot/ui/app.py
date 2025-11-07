@@ -280,8 +280,8 @@ def ui():
     }
 
     .gradio-container .bg-white,
-    .gradio-container .bg-white\\/0,
-    .gradio-container .bg-white\\/50,
+    .gradio-container .bg-white\/0,
+    .gradio-container .bg-white\/50,
     .gradio-container [style*="background: white"],
     .gradio-container [style*="background-color: white"] {
       background:var(--sp-card-bg) !important;
@@ -382,8 +382,6 @@ def ui():
                 )
             with gr.Column(scale=2):
                 backend = (f"Ollama · {OLLAMA_MODEL}" if (LLM_BACKEND or "").lower() == "ollama" else (LLM_BACKEND or "—").upper())
-                status_html = gr.HTML(elem_classes=["sp-card"])
-
                 def _llm_status():
                     if (LLM_BACKEND or "").lower() == "ollama":
                         ok = ollama_up()
@@ -403,7 +401,7 @@ def ui():
                           <div class="sp-pill">UI: Gradio</div>
                           <div style="margin-top:8px">ℹ️ Для OpenAI-совместимых эндпоинтов прогресс виден в баре действий.</div>
                         </div>"""
-                status_html.value = _llm_status()
+                status_html = gr.HTML(value=_llm_status(), elem_classes=["sp-card"])
                 gr.Button("↻ Проверить LLM").click(lambda: _llm_status(), outputs=status_html)
 
         with gr.Tabs():
@@ -444,12 +442,11 @@ def ui():
                         value=True,
                         label="Скрывать PII (имена/email/телефон) перед обработкой",
                         elem_classes=["sp-card"],
-                        elem_id="hide_pii",  # фикс кликабельности
+                        elem_id="hide_pii",
                     )
                 with gr.Row():
                     btn_fit = gr.Button("Оценить соответствие", variant="primary", interactive=False)
                     btn_graph = gr.Button("Построить рекомендации навыков", variant="secondary", interactive=False)
-                # What-if тюнинг (Δscore)
                 with gr.Row():
                     wi_terms = gr.Textbox(label="What-if навыки (через запятую)", placeholder="kubernetes, airflow, spark")
                     btn_wi = gr.Button("Проверить Δscore", variant="secondary")
@@ -468,7 +465,6 @@ def ui():
                 cover = gr.Textbox(label="Сопроводительное письмо", lines=12, elem_classes=["sp-card"])
                 plan = gr.Textbox(label="План на 7 дней", lines=12, elem_classes=["sp-card"])
 
-                # STAR-буллетайзер
                 with gr.Row():
                     raw_exp = gr.Textbox(label="Сырой опыт (параграф)", lines=6, placeholder="Опишите опыт без структуры")
                 with gr.Row():
@@ -486,7 +482,6 @@ def ui():
                     md_pkg = gr.File(label="MD-пакет (ZIP)", interactive=False)
                     pdf_file = gr.File(label="PDF-файл", interactive=False)
 
-                # Executive Summary
                 with gr.Row():
                     role_hint = gr.Textbox(label="Целевая роль (для summary)", placeholder="Senior Data Scientist")
                     btn_summary = gr.Button("⬇️ Executive Summary (PDF)", variant="secondary")
@@ -551,9 +546,16 @@ def ui():
 
         # -------- handlers --------
 
-        btn_demo.click(_load_demo, inputs=None, outputs=[jd, resume])
+        # демо + включение кнопок
+        btn_demo.click(_load_demo, inputs=None, outputs=[jd, resume]) \
+                .then(lambda j, r: _update_buttons(j, r), inputs=[jd, resume],
+                      outputs=[btn_fit, btn_graph, btn_tailor, btn_cover, btn_plan])
 
-        btn_file2text.click(lambda f1, f2: (_read_any(f1), _read_any(f2)), inputs=[jd_file, cv_file], outputs=[jd, resume])
+        # чтение файлов + включение кнопок
+        btn_file2text.click(lambda f1, f2: (_read_any(f1), _read_any(f2)),
+                            inputs=[jd_file, cv_file], outputs=[jd, resume]) \
+                     .then(lambda j, r: _update_buttons(j, r), inputs=[jd, resume],
+                           outputs=[btn_fit, btn_graph, btn_tailor, btn_cover, btn_plan])
 
         def _update_buttons(jd_text, cv_text):
             ok = _can_run(jd_text, cv_text)
@@ -573,19 +575,22 @@ def ui():
                 return [], None
             J = anonymize(jd_text) if hide else jd_text
             resumes = []
-            # ZIP
+            # ZIP: использовать read_any_to_text для PDF/DOCX
             if zip_file is not None:
                 try:
                     with zipfile.ZipFile(zip_file.name, "r") as z:
                         for nm in z.namelist():
                             if nm.endswith("/") or nm.startswith("__MACOSX/"):
                                 continue
-                            data = z.read(nm)
-                            try:
-                                txt = data.decode("utf-8", "ignore")
-                            except Exception:
-                                txt = ""
-                            resumes.append((nm, anonymize(txt) if hide else txt))
+                            with z.open(nm) as f:
+                                tmp = tempfile.NamedTemporaryFile(delete=False)
+                                tmp.write(f.read()); tmp.flush(); tmp.close()
+                                try:
+                                    txt = read_any_to_text(tmp.name)
+                                finally:
+                                    try: os.unlink(tmp.name)
+                                    except Exception: pass
+                                resumes.append((nm, anonymize(txt) if hide else txt))
                 except Exception:
                     pass
             # files
@@ -639,9 +644,11 @@ def ui():
         def _gen_stream_wrapper(text: str):
             yield from _yield_chunks(text)
 
+        # генераторный хендлер (важно: yield)
         def _guarded(gen_fn, j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
-                return "Сначала заполните JD и резюме."
+                yield "Сначала заполните JD и резюме."
+                return
             J = anonymize(j) if hide else j
             R = anonymize(r) if hide else r
             progress(0.08, desc="🔧 Готовим промпт…")
@@ -649,7 +656,10 @@ def ui():
             progress(0.28, desc="🤖 Вызываем LLM…")
             out = gen_fn(R, J)  # сигнатуры генераторов: (resume, jd)
             progress(0.9, desc="✍️ Заполняем поле…")
-            return (_gen_stream_wrapper(out) if do_stream else out)
+            if do_stream:
+                yield from _gen_stream_wrapper(out)
+            else:
+                yield out
 
         tailor_evt = btn_tailor.click(lambda j, r, st, hide: _guarded(make_tailored_resume, j, r, st, hide),
                                       inputs=[jd, resume, stream_out, hide_pii], outputs=[tailored])
@@ -659,13 +669,17 @@ def ui():
 
         def _make_plan(j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
-                return "Сначала заполните JD и резюме."
+                yield "Сначала заполните JD и резюме."
+                return
             J = anonymize(j) if hide else j
             R = anonymize(r) if hide else r
             progress(0.2, desc="📊 Анализируем JD/резюме…")
-            out = make_7day_plan(J, R)  # исходная сигнатура генератора плана
+            out = make_7day_plan(R, J)  # консистентно: (resume, jd)
             progress(0.9, desc="✍️ Заполняем поле…")
-            return (_gen_stream_wrapper(out) if do_stream else out)
+            if do_stream:
+                yield from _gen_stream_wrapper(out)
+            else:
+                yield out
 
         plan_evt = btn_plan.click(_make_plan, inputs=[jd, resume, stream_out, hide_pii], outputs=[plan])
 
@@ -706,26 +720,20 @@ def ui():
         def _graph_img(j, r, hide):
             J = anonymize(j) if hide else j
             R = anonymize(r) if hide else r
-            # Быть терпимее к формату ответа и падениям
             try:
                 res = demo_graph_reco(J, R)
             except Exception:
                 res = None
 
-            # Вариант A: (G, have, recs)
             if isinstance(res, tuple) and len(res) >= 1:
                 try:
                     return render_graph_png(res[0], target_role="под JD")
                 except Exception:
                     pass
-
-            # Вариант B: вернулся сам граф/путь
             try:
                 return render_graph_png(res, target_role="под JD")
             except Exception:
                 pass
-
-            # Фоллбек: построить хотя бы по тексту резюме
             try:
                 return render_graph_png(R, target_role="под JD")
             except Exception:
@@ -769,11 +777,10 @@ def ui():
         btn_star.click(lambda t: starify(t or ""), inputs=[raw_exp], outputs=[star_out])
 
         # ---- Executive Summary PDF
-        def _mk_summary(role_hint_val, score, st, gp, ats_obj, diag_text, hide, progress=gr.Progress()):
+        def _mk_summary(role_hint_val, score, st, gp, ats_obj, diag_text, hide, resume_text, progress=gr.Progress()):
             progress(0.2, desc="Собираем отчёт…")
-            # если ATS ещё не считали — посчитаем на лету
             if not isinstance(ats_obj, dict) or not ats_obj:
-                ats_obj = ats_check(anonymize(resume.value) if hide else (resume.value or ""))
+                ats_obj = ats_check(anonymize(resume_text) if hide else (resume_text or ""))
             md, rimg, himg = build_summary_md(role_hint_val, int(score or 0), st, gp, ats_obj, diag_text)
             content = md
             if rimg: content += f"\n\n![radar]({rimg})"
@@ -784,7 +791,7 @@ def ui():
             progress(1.0); return pdf
 
         btn_summary.click(_mk_summary,
-                          inputs=[role_hint, score_out, strengths, gaps, ats_json, diag, hide_pii],
+                          inputs=[role_hint, score_out, strengths, gaps, ats_json, diag, hide_pii, resume],
                           outputs=[summary_pdf])
 
         # ---- Пакет ZIP
