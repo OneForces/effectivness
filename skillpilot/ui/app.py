@@ -18,6 +18,10 @@ from ..utils.pii import anonymize  # режим приватности (PII)
 from ..utils.batch import batch_score, read_any_to_text
 from ..utils.viz import radar_coverage, heat_coverage
 from ..utils.ats import ats_check
+# ⬇️ добавлено: what-if, STAR, executive summary
+from ..utils.whatif import delta_scores
+from ..gen.star import starify
+from ..utils.summary import build_summary_md
 
 THEME_MODE = (os.getenv("THEME", "light") or "light").strip().lower()  # light | dark
 
@@ -198,7 +202,12 @@ def ui():
     ::-webkit-scrollbar-thumb{ background:#D2D8E4; border-radius:8px; }
     ::-webkit-scrollbar-track{ background:#EFF2F8; }
 
-    /* Делаем чекбокс гарантированно кликабельным */
+    /* Делаем чекбоксы гарантированно кликабельными */
+    .gradio-container input[type="checkbox"]{ appearance:auto !important; }
+    .gradio-container .gr-checkbox input,
+    .gradio-container .gr-checkbox label{ pointer-events:auto !important; }
+
+    /* Стрим-чекбокс */
     #stream_out input[type="checkbox"]{
       appearance:auto !important;
       accent-color: var(--sp-accent) !important;
@@ -209,6 +218,19 @@ def ui():
       position: relative; z-index: 5; pointer-events: auto !important;
     }
     #stream_out, #stream_out * { position: relative; z-index: 5; pointer-events: auto !important; }
+
+    /* PII-чекбокс */
+    #hide_pii input[type="checkbox"]{
+      appearance:auto !important;
+      accent-color: var(--sp-accent) !important;
+      width:20px; height:20px;
+      border:1.5px solid var(--sp-card-border) !important;
+      border-radius:6px;
+      background: var(--sp-card-bg) !important;
+      position: relative; z-index: 5; pointer-events: auto !important;
+    }
+    #hide_pii, #hide_pii * { position: relative; z-index: 5; pointer-events: auto !important; }
+    #hide_pii label { user-select: none; }
     """
 
     CSS_DARK = """
@@ -223,10 +245,10 @@ def ui():
       --background-fill-secondary:#101826 !important;
       --block-background-fill:#101826 !important;
       --border-color-primary:#293247 !important;
-      --color-text:#E6EAF2 !импортант;
+      --color-text:#E6EAF2 !important;
     }
 
-    .gradio-container { max_width:1160px !important; margin:0 auto !important; }
+    .gradio-container { max-width:1160px !important; margin:0 auto !important; }
     html, body { background:var(--sp-bg) !important; color:var(--sp-text) !important; }
     .prose, .gr-prose, .markdown, .markdown * { color:var(--sp-text) !important; }
 
@@ -305,14 +327,19 @@ def ui():
 
     .gr-button,.btn { border-radius:12px !important; }
 
-    .tabs{ margin_top:6px; }
+    .tabs{ margin-top:6px; }
     .tabs > div[role="tablist"] button[aria-selected="true"] { box-shadow: inset 0 -2px 0 0 var(--sp-accent) !important; }
 
     ::-webkit-scrollbar{ height:10px; width:10px; }
     ::-webkit-scrollbar-thumb{ background:#2D3B55; border-radius:8px; }
     ::-webkit-scrollbar-track{ background:#0E1522; }
 
-    /* Делаем чекбокс гарантированно кликабельным */
+    /* Делаем чекбоксы гарантированно кликабельными */
+    .gradio-container input[type="checkbox"]{ appearance:auto !important; }
+    .gradio-container .gr-checkbox input,
+    .gradio-container .gr-checkbox label{ pointer-events:auto !important; }
+
+    /* Стрим-чекбокс */
     #stream_out input[type="checkbox"]{
       appearance:auto !important;
       accent-color: var(--sp-accent) !important;
@@ -323,6 +350,19 @@ def ui():
       position: relative; z-index: 5; pointer-events: auto !important;
     }
     #stream_out, #stream_out * { position: relative; z-index: 5; pointer-events: auto !important; }
+
+    /* PII-чекбокс */
+    #hide_pii input[type="checkbox"]{
+      appearance:auto !important;
+      accent-color: var(--sp-accent) !important;
+      width:20px; height:20px;
+      border:1.5px solid var(--sp-card-border) !important;
+      border-radius:6px;
+      background: var(--sp-card-bg) !important;
+      position: relative; z-index: 5; pointer-events: auto !important;
+    }
+    #hide_pii, #hide_pii * { position: relative; z-index: 5; pointer-events: auto !important; }
+    #hide_pii label { user-select: none; }
     """
 
     css = CSS_DARK if THEME_MODE == "dark" else CSS_LIGHT
@@ -400,10 +440,20 @@ def ui():
                     gaps = gr.JSON(label="Пробелы", elem_classes=["sp-card"])
                 diag = gr.Textbox(label="Диагностика / Coverage", lines=8, elem_classes=["sp-card"])
                 with gr.Row():
-                    hide_pii = gr.Checkbox(value=True, label="Скрывать PII (имена/email/телефон) перед обработкой", elem_classes=["sp-card"])
+                    hide_pii = gr.Checkbox(
+                        value=True,
+                        label="Скрывать PII (имена/email/телефон) перед обработкой",
+                        elem_classes=["sp-card"],
+                        elem_id="hide_pii",  # фикс кликабельности
+                    )
                 with gr.Row():
                     btn_fit = gr.Button("Оценить соответствие", variant="primary", interactive=False)
                     btn_graph = gr.Button("Построить рекомендации навыков", variant="secondary", interactive=False)
+                # What-if тюнинг (Δscore)
+                with gr.Row():
+                    wi_terms = gr.Textbox(label="What-if навыки (через запятую)", placeholder="kubernetes, airflow, spark")
+                    btn_wi = gr.Button("Проверить Δscore", variant="secondary")
+                wi_table = gr.Dataframe(headers=["term","base","with_term","delta"], interactive=False)
 
             # ----- Генерация
             with gr.Tab("✍️ Генерация"):
@@ -418,6 +468,13 @@ def ui():
                 cover = gr.Textbox(label="Сопроводительное письмо", lines=12, elem_classes=["sp-card"])
                 plan = gr.Textbox(label="План на 7 дней", lines=12, elem_classes=["sp-card"])
 
+                # STAR-буллетайзер
+                with gr.Row():
+                    raw_exp = gr.Textbox(label="Сырой опыт (параграф)", lines=6, placeholder="Опишите опыт без структуры")
+                with gr.Row():
+                    btn_star = gr.Button("→ Преобразовать в STAR-буллеты", variant="secondary")
+                star_out = gr.Textbox(label="STAR-буллеты", lines=8, elem_classes=["sp-card"])
+
                 with gr.Row():
                     btn_bundle = gr.Button("⬇️ Скачать пакет (ZIP)", variant="secondary")
                     bundle_file = gr.File(label="Готовый ZIP", interactive=False)
@@ -429,20 +486,26 @@ def ui():
                     md_pkg = gr.File(label="MD-пакет (ZIP)", interactive=False)
                     pdf_file = gr.File(label="PDF-файл", interactive=False)
 
+                # Executive Summary
+                with gr.Row():
+                    role_hint = gr.Textbox(label="Целевая роль (для summary)", placeholder="Senior Data Scientist")
+                    btn_summary = gr.Button("⬇️ Executive Summary (PDF)", variant="secondary")
+                summary_pdf = gr.File(label="Summary PDF", interactive=False)
+
             # ----- Навыки / Граф
             with gr.Tab("🧭 Навыки / Граф"):
                 with gr.Row():
                     path_text = gr.Textbox(label="SkillGraph рекомендации (текст)", lines=8, elem_classes=["sp-card"])
                     graph_img = gr.Image(label="SkillGraph (PNG)", type="filepath", elem_classes=["sp-card"])
 
-            # ----- Визуализация (новая)
+            # ----- Визуализация
             with gr.Tab("📊 Визуализация"):
                 gr.Markdown("Radar и Heatmap по покрытию топ-навыков JD из блока «Диагностика / Coverage».")
                 viz_radar = gr.Image(label="Radar", type="filepath")
                 viz_heat  = gr.Image(label="Heatmap", type="filepath")
                 btn_viz   = gr.Button("Построить графики", variant="secondary")
 
-            # ----- ATS-чекер (новая)
+            # ----- ATS-чекер
             with gr.Tab("🧾 ATS-чекер"):
                 gr.Markdown("Быстрый аудит структуры резюме под ATS.")
                 ats_json = gr.JSON(label="Отчёт")
@@ -515,7 +578,7 @@ def ui():
                 try:
                     with zipfile.ZipFile(zip_file.name, "r") as z:
                         for nm in z.namelist():
-                            if nm.endswith("/") or nm.startswith("__MACOSX/"): 
+                            if nm.endswith("/") or nm.startswith("__MACOSX/"):
                                 continue
                             data = z.read(nm)
                             try:
@@ -558,6 +621,20 @@ def ui():
 
         btn_fit.click(do_fit, inputs=[jd, resume, hide_pii], outputs=[score_out, strengths, gaps, diag])
 
+        # What-if Δscore
+        def _do_whatif(jd_text, cv_text, terms, hide):
+            if not _can_run(jd_text, cv_text):
+                return []
+            J = anonymize(jd_text) if hide else jd_text
+            R = anonymize(cv_text) if hide else cv_text
+            add = [t.strip() for t in (terms or "").split(",") if t.strip()]
+            if not add:
+                return []
+            base, rows = delta_scores(J, R, add)
+            return [[t, b, s, s-b] for (t, b, s) in rows]
+
+        btn_wi.click(_do_whatif, inputs=[jd, resume, wi_terms, hide_pii], outputs=[wi_table])
+
         # ---- Генерация (визуальный стрим)
         def _gen_stream_wrapper(text: str):
             yield from _yield_chunks(text)
@@ -592,7 +669,7 @@ def ui():
 
         plan_evt = btn_plan.click(_make_plan, inputs=[jd, resume, stream_out, hide_pii], outputs=[plan])
 
-        # Кнопка «Стоп» реально останавливает любые три генерации выше
+        # Кнопка «Стоп»
         btn_stop.click(lambda: None, inputs=None, outputs=None, cancels=[tailor_evt, cover_evt, plan_evt])
 
         # ---- Prompt-песочница (настоящий стрим из llm_stream)
@@ -629,12 +706,30 @@ def ui():
         def _graph_img(j, r, hide):
             J = anonymize(j) if hide else j
             R = anonymize(r) if hide else r
-            res = demo_graph_reco(J, R)
+            # Быть терпимее к формату ответа и падениям
             try:
-                G, _, _ = res
+                res = demo_graph_reco(J, R)
+            except Exception:
+                res = None
+
+            # Вариант A: (G, have, recs)
+            if isinstance(res, tuple) and len(res) >= 1:
+                try:
+                    return render_graph_png(res[0], target_role="под JD")
+                except Exception:
+                    pass
+
+            # Вариант B: вернулся сам граф/путь
+            try:
+                return render_graph_png(res, target_role="под JD")
+            except Exception:
+                pass
+
+            # Фоллбек: построить хотя бы по тексту резюме
+            try:
+                return render_graph_png(R, target_role="под JD")
             except Exception:
                 return None
-            return render_graph_png(G, target_role="под JD")
 
         btn_graph.click(_graph_text, inputs=[jd, resume, hide_pii], outputs=[path_text])
         btn_graph.click(_graph_img, inputs=[jd, resume, hide_pii], outputs=[graph_img])
@@ -669,6 +764,28 @@ def ui():
         # ---- ATS-чекер
         btn_ats.click(lambda txt, hide: ats_check(anonymize(txt) if hide else txt),
                       inputs=[resume, hide_pii], outputs=[ats_json])
+
+        # ---- STAR-буллетайзер
+        btn_star.click(lambda t: starify(t or ""), inputs=[raw_exp], outputs=[star_out])
+
+        # ---- Executive Summary PDF
+        def _mk_summary(role_hint_val, score, st, gp, ats_obj, diag_text, hide, progress=gr.Progress()):
+            progress(0.2, desc="Собираем отчёт…")
+            # если ATS ещё не считали — посчитаем на лету
+            if not isinstance(ats_obj, dict) or not ats_obj:
+                ats_obj = ats_check(anonymize(resume.value) if hide else (resume.value or ""))
+            md, rimg, himg = build_summary_md(role_hint_val, int(score or 0), st, gp, ats_obj, diag_text)
+            content = md
+            if rimg: content += f"\n\n![radar]({rimg})"
+            if himg: content += f"\n\n![heatmap]({himg})"
+            out_dir = os.path.join("/tmp", f"skillpilot_summary_{int(time.time())}")
+            os.makedirs(out_dir, exist_ok=True)
+            pdf = export_pdf(out_dir, "executive_summary", content, title="Executive Summary")
+            progress(1.0); return pdf
+
+        btn_summary.click(_mk_summary,
+                          inputs=[role_hint, score_out, strengths, gaps, ats_json, diag, hide_pii],
+                          outputs=[summary_pdf])
 
         # ---- Пакет ZIP
         btn_bundle.click(lambda t, c, p, j, r: _bundle_artifacts(t, c, p, j, r),
