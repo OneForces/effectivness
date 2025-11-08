@@ -60,47 +60,7 @@ sudo usermod -aG docker $USER
 **2) Файл `docker-compose.yml`:**
 
 ```yaml
-version: "3.9"
-
-services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  app:
-    build: .
-    container_name: skillpilot-app
-    env_file: .env
-    depends_on:
-      ollama:
-        condition: service_healthy
-    ports:
-      - "${PORT:-7860}:7860"
-    environment:
-      # пробрасываем адрес модели (совпадает с .env)
-      OLLAMA_HOST: ${OLLAMA_HOST}
-      OLLAMA_MODEL: ${OLLAMA_MODEL}
-      LLM_BACKEND: ${LLM_BACKEND}
-      EMB_MODEL: ${EMB_MODEL}
-      HOST: ${HOST}
-      PORT: ${PORT}
-    volumes:
-      - ./sample_data:/app/sample_data:ro
-      - ./data:/root/.skillpilot
-    command: ["bash", "-lc", "python -m skillpilot.ui.app"]
-
-volumes:
-  ollama:
+Docker-compose не менять
 ```
 
 **3) Старт стека:**
@@ -110,10 +70,7 @@ docker compose up -d --build
 
 **4) Загрузка модели в Ollama (один раз):**
 ```bash
-# вариант A: через отдельный терминал
-docker exec -it ollama ollama pull ${OLLAMA_MODEL}
-
-# (опционально) проверить список моделей
+Модель автоматически скачается за 10 минут. Потом можно проверить ее готовность - 
 docker exec -it ollama ollama list
 ```
 
