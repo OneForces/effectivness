@@ -21,6 +21,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -30,17 +31,7 @@ services:
       - ollama_data:/root/.ollama
     environment:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
-    # ВАЖНО: меняем entrypoint на шелл; командой поднимаем сервер, ждём его, тянем модель, держим процесс живым
-    entrypoint: ["/bin/sh","-lc"]
-    command: |
-      'set -e
-       ollama serve & 
-       srv=$!
-       # ждём, пока CLI сможет говорить с сервером
-       until ollama list >/dev/null 2>&1; do sleep 1; done
-       echo "Pulling model: ${OLLAMA_MODEL:-mistral}"
-       ollama pull "${OLLAMA_MODEL:-mistral}"
-       wait "$srv"'
+    command: ["serve"]               # стандартный режим
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
       interval: 10s
@@ -48,6 +39,8 @@ services:
       retries: 6
       start_period: 5s
     restart: unless-stopped
+
+
 
 volumes:
   ollama_data:
