@@ -1,63 +1,53 @@
-version: "3.9"
-
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        EMB_MODEL: ${EMB_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+    image: skillpilot_py:latest
+    container_name: skillpilot_py
+    environment:
+      HF_HOME: /opt/hf
+      LLM_BACKEND: ${LLM_BACKEND:-ollama}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-7860}
+    ports:
+      - "${PORT:-7860}:7860"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
     ports:
       - "11434:11434"
     volumes:
-      - ollama:/root/.ollama
-    restart: unless-stopped
-    # platform: linux/arm64  # если Apple Silicon
-
-  embed_init:
-    image: python:3.11-slim
-    container_name: embed_init
+      - ollama_data:/root/.ollama
     environment:
-      - HF_HOME=/opt/hf
-      - TRANSFORMERS_CACHE=/opt/hf
-    volumes:
-      - model_cache:/opt/hf
-    command: >
-      bash -lc "
-        pip install -U --no-cache-dir sentence-transformers &&
-        python -c 'from sentence_transformers import SentenceTransformer as S; S(\"sentence-transformers/all-MiniLM-L6-v2\")' &&
-        echo '✅ cache primed'
-      "
-    restart: "no"
-
-  app:
-    build: .
-    image: skillpilot_py:latest
-    container_name: skillpilot_py
-    env_file:
-      - .env
-    environment:
-      - HOST=0.0.0.0
-      - PORT=7860
-      - LLM_BACKEND=ollama
-      - OLLAMA_HOST=http://ollama:11434
-      - HF_HOME=/opt/hf
-      - TRANSFORMERS_CACHE=/opt/hf
-    ports:
-      - "7860:7860"
-    volumes:
-      - model_cache:/opt/hf
-      - ./sample_data:/app/sample_data:ro
-    depends_on:
-      ollama:
-        condition: service_started
-      embed_init:
-        condition: service_completed_successfully
-    restart: unless-stopped
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
+    # ВАЖНО: меняем entrypoint на шелл; командой поднимаем сервер, ждём его, тянем модель, держим процесс живым
+    entrypoint: ["/bin/sh","-lc"]
+    command: |
+      'set -e
+       ollama serve & 
+       srv=$!
+       # ждём, пока CLI сможет говорить с сервером
+       until ollama list >/dev/null 2>&1; do sleep 1; done
+       echo "Pulling model: ${OLLAMA_MODEL:-mistral}"
+       ollama pull "${OLLAMA_MODEL:-mistral}"
+       wait "$srv"'
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860')"]
-      interval: 30s
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 20s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
 
 volumes:
-  model_cache:
-  ollama:
+  ollama_data:
