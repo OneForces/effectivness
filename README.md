@@ -70,7 +70,7 @@ docker compose up -d --build
 
 **4) Загрузка модели в Ollama (один раз):**
 ```bash
-Модель автоматически скачается за 10 минут. Потом можно проверить ее готовность - 
+docker exec -it ollama sh -lc 'ollama pull "${OLLAMA_MODEL:-mistral}" && ollama list'
 docker exec -it ollama ollama list
 ```
 
