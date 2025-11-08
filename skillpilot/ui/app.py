@@ -10,15 +10,13 @@ from ..gen.plan import make_7day_plan
 from ..interview.qa import gen_questions, grade_answer
 from ..graph.skill_graph import demo_graph_reco, render_graph_png
 from ..utils.export import export_md, export_pdf
-from ..gen.llm_ollama import is_available as ollama_up  # индикатор статуса
-from ..gen.llm import llm_stream  # настоящий стрим для песочницы
-from ..utils.pii import anonymize  # режим приватности (PII)
+from ..gen.llm_ollama import is_available as ollama_up
+from ..gen.llm import llm_stream
+from ..utils.pii import anonymize
 
-# ⬇️ новые утилиты (вау-фичи)
 from ..utils.batch import batch_score, read_any_to_text
 from ..utils.viz import radar_coverage, heat_coverage
 from ..utils.ats import ats_check
-# ⬇️ добавлено: what-if, STAR, executive summary
 from ..utils.whatif import delta_scores
 from ..gen.star import starify
 from ..utils.summary import build_summary_md
@@ -575,7 +573,6 @@ def ui():
                 return [], None
             J = anonymize(jd_text) if hide else jd_text
             resumes = []
-            # ZIP: использовать read_any_to_text для PDF/DOCX
             if zip_file is not None:
                 try:
                     with zipfile.ZipFile(zip_file.name, "r") as z:
@@ -593,7 +590,6 @@ def ui():
                                 resumes.append((nm, anonymize(txt) if hide else txt))
                 except Exception:
                     pass
-            # files
             if file_list:
                 for fp in file_list:
                     path = fp if isinstance(fp, str) else getattr(fp, "name", "")
@@ -644,7 +640,6 @@ def ui():
         def _gen_stream_wrapper(text: str):
             yield from _yield_chunks(text)
 
-        # генераторный хендлер (важно: yield)
         def _guarded(gen_fn, j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
                 yield "Сначала заполните JD и резюме."
@@ -661,11 +656,19 @@ def ui():
             else:
                 yield out
 
-        tailor_evt = btn_tailor.click(lambda j, r, st, hide: _guarded(make_tailored_resume, j, r, st, hide),
-                                      inputs=[jd, resume, stream_out, hide_pii], outputs=[tailored])
+        def _tailor_handler(j, r, st, hide):
+            yield from _guarded(make_tailored_resume, j, r, st, hide)
 
-        cover_evt = btn_cover.click(lambda j, r, st, hide: _guarded(make_cover, j, r, st, hide),
-                                    inputs=[jd, resume, stream_out, hide_pii], outputs=[cover])
+        def _cover_handler(j, r, st, hide):
+            yield from _guarded(make_cover, j, r, st, hide)
+
+        tailor_evt = btn_tailor.click(_tailor_handler,
+                                      inputs=[jd, resume, stream_out, hide_pii],
+                                      outputs=[tailored])
+
+        cover_evt = btn_cover.click(_cover_handler,
+                                    inputs=[jd, resume, stream_out, hide_pii],
+                                    outputs=[cover])
 
         def _make_plan(j, r, do_stream: bool, hide: bool, progress=gr.Progress(track_tqdm=True)):
             if not _can_run(j, r):
@@ -674,7 +677,7 @@ def ui():
             J = anonymize(j) if hide else j
             R = anonymize(r) if hide else r
             progress(0.2, desc="📊 Анализируем JD/резюме…")
-            out = make_7day_plan(R, J)  # консистентно: (resume, jd)
+            out = make_7day_plan(R, J)
             progress(0.9, desc="✍️ Заполняем поле…")
             if do_stream:
                 yield from _gen_stream_wrapper(out)
@@ -742,7 +745,7 @@ def ui():
         btn_graph.click(_graph_text, inputs=[jd, resume, hide_pii], outputs=[path_text])
         btn_graph.click(_graph_img, inputs=[jd, resume, hide_pii], outputs=[graph_img])
 
-        # ---- Визуализация (парсим coverage из diag)
+        # ---- Визуализация
         def _parse_marks(diag_text: str):
             marks, skills = [], []
             if "Coverage:" in (diag_text or ""):
@@ -868,6 +871,12 @@ def ui():
             "⌛️ Первая генерация на «холодной» модели может быть дольше; повторы быстрее благодаря keep_alive.",
             elem_classes=["sp-card"]
         )
+
+        # Включаем очередь (без аргументов — совместимо с твоей версией Gradio)
+        try:
+            demo.queue()
+        except Exception:
+            pass
 
     return demo
 
